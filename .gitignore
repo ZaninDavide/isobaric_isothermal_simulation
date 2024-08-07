@@ -1,0 +1,10 @@
+.vscode
+*.dat
+*.png
+*.DS_Store
+*.x
+*.log
+data
+plots
+data/*.dat
+plots/*.png
