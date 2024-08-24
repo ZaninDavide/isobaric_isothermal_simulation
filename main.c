@@ -5,14 +5,15 @@
 #include <time.h>
 #include <stdbool.h>
 
-#define CROW 4 // Number of cells in a row
+#define CROW 5 // Number of cells in a row
 #define M 4 // Number of particles in a cell
 #define m 1.0
 #define Kb 1.0
 #define epsilon 1.0
 #define PI 3.1415926535897932384626433
 #define BINS 150 // number of bins for the histogram of g(r)
-#define LOGARITHMIC_VOLUME_MOVES 0
+#define DENSITY_BINS 300 // number of bins for the histogram of rho during the simulation
+#define LOGARITHMIC_VOLUME_MOVES 1
 
 #define N (CROW*CROW*CROW*M) // Total number of particles (constant)
 double P = 0.0; // Pressure (constant) 
@@ -38,9 +39,10 @@ typedef struct vec3 {
 typedef struct Measure {
     double temp; // temperature
     double comp; // compressibilità
-    double ener; // energia
+    double ener; // energia per particella (meno energia cinetica)
     double vol;  // volume
-    double rho;  // volume
+    double rho;  // densità
+    double enth;  // entalpia totale (meno energia cinetica)
 } Measure;
 
 // Lennard Jones potential energy separated in the two components (V6, V12). Vtot = V6 + V12
@@ -57,7 +59,7 @@ LennardJonesPotential add_potentials(LennardJonesPotential P1, LennardJonesPoten
 
 //                      HISTOGRAM OF PARTICLE DISTANCES
 
-double* histogram;
+double* histogram = NULL;
 
 void add_to_distribution_histogram(Particle S[]) {
     double bin_width = 1.0 / BINS;
@@ -91,6 +93,29 @@ void save_distribution_histogram(FILE* file, unsigned int steps) {
     }
 }
 
+
+
+
+//                      HISTOGRAM OF SYSTEM DENSITIES
+
+int* density_histogram = NULL;
+
+void add_to_density_histogram(double density) {
+    double bin_width = 1.5 / DENSITY_BINS;
+    if(density < 1.5 & density > 0) {
+        density_histogram[(int) floor(density / bin_width)] += 1;
+    }else{
+        printf("Density expected to be between 0.0 and 1.5");
+        exit(1);
+    }
+}
+
+void save_density_histogram(FILE* file) {
+    double bin_width = 1.5 / DENSITY_BINS;
+    for (int j = 0; j < DENSITY_BINS; j++) {
+        fprintf(file, "%10.5e %d\n", j * bin_width, density_histogram[j]);
+    }
+}
 
 
 
@@ -191,60 +216,72 @@ double get_forces_lennard_jones(Particle S[], vec3 F[]) {
 //                      MEASURES
 
 FILE* file_measures = NULL;
-Measure measure_metropolis(Particle S[], vec3 F[], double time, double potential_energy, double W_forces) {
+Measure measure_metropolis(Particle S[], double time, double potential_energy, double W_forces) {
+    double rho = m * N / V;
+    
     // Compressibilità
     double compressibility = 1 + W_forces / 3.0 / Kb / T;
+    compressibility = P / rho / Kb / T;
 
-    // 1. Step     2. PotentialEnergyPerParticle     3. Compressibility
+    // 1. Step     2. PotentialEnergyPerParticle     3. Compressibility     4. Volume
     if(file_measures) fprintf(file_measures, "%10.10e %10.10e %10.10e %10.10e\n", time, potential_energy / N, compressibility, V);
 
-    return (Measure) { T, compressibility, potential_energy / N, V, m*N/V };
+    double enthalpy = (potential_energy + P * V) / N; // entalpia per particella
+
+    return (Measure) { T, compressibility, potential_energy / N, V, rho, enthalpy };
 }
 
 Measure averages(Measure* measures, int start, int end) {
-    Measure avg = (Measure) {0, 0, 0};
+    Measure avg = (Measure) {0, 0, 0, 0, 0, 0};
     for(int i = start; i < end; i++) { 
         avg.temp += measures[i].temp; 
         avg.comp += measures[i].comp; 
         avg.ener += measures[i].ener; 
         avg.vol  += measures[i].vol; 
         avg.rho  += measures[i].rho; 
+        avg.enth += measures[i].enth; 
     }
     avg.temp /= end - start;
     avg.comp /= end - start;
     avg.ener /= end - start;
     avg.vol  /= end - start;
     avg.rho  /= end - start;
+    avg.enth /= end - start;
     return avg;
 }
 
 Measure variances(Measure* measures, Measure avg, int start, int end) {
-    Measure var = (Measure) {0, 0, 0};
+    Measure var = (Measure) {0, 0, 0, 0, 0, 0};
     for(int i = start; i < end; i++) { 
         var.temp += (measures[i].temp - avg.temp)*(measures[i].temp - avg.temp); 
         var.comp += (measures[i].comp - avg.comp)*(measures[i].comp - avg.comp); 
         var.ener += (measures[i].ener - avg.ener)*(measures[i].ener - avg.ener); 
         var.vol  += (measures[i].vol  - avg.vol )*(measures[i].vol  - avg.vol ); 
         var.rho  += (measures[i].rho  - avg.rho )*(measures[i].rho  - avg.rho ); 
+        var.enth += (measures[i].enth - avg.enth)*(measures[i].enth - avg.enth); 
     }
     var.temp /= end - start;
     var.comp /= end - start;
     var.ener /= end - start;
     var.vol  /= end - start;
     var.rho  /= end - start;
+    var.enth /= end - start;
     return var;
 }
 
-void averages_and_plateau(Measure *measures, int steps, int k) {
+void averages_and_plateau(Measure *measures, int steps, int k, Measure* avg, Measure* var, double* cp) {
     // Global Averages (on the second half of the data)
-    Measure avg = averages(measures, steps/2, steps);
-    Measure var = variances(measures, avg, steps/2, steps); // Meaningful only with velocity verlet
+    *avg = averages(measures, steps/2, steps);
+    *var = variances(measures, *avg, steps/2, steps); // Meaningful only with velocity verlet
+    *cp = 1.5 + var->enth / Kb / T / T * N;
 
-    printf("Temperatura = %f ± %f\n", avg.temp, sqrt(var.temp));
-    printf("Compressibilità = %f ± %f\n", avg.comp, sqrt(var.comp));
-    printf("Energia = %f ± %2.5e\n", avg.ener, sqrt(var.ener));
-    printf("Volume = %f ± %2.5e\n", avg.vol, sqrt(var.vol));
-    printf("Densità = %f ± %2.5e\n", avg.rho, sqrt(var.rho));
+    printf("Temperatura = %f ± %f\n", avg->temp, sqrt(var->temp));
+    printf("Compressibilità = %f ± %f\n", avg->comp, sqrt(var->comp));
+    printf("Energia = %f ± %2.5e\n", avg->ener, sqrt(var->ener));
+    printf("Volume = %f ± %2.5e\n", avg->vol, sqrt(var->vol));
+    printf("Densità = %f ± %2.5e\n", avg->rho, sqrt(var->rho));
+    printf("Calore specifico (cP/kB) = 5/2 + %f = %f\n", *cp - 2.5, *cp);
+
 
     // Plateau file
     char varAvgBFile_name[20]; 
@@ -254,18 +291,19 @@ void averages_and_plateau(Measure *measures, int steps, int k) {
     // Variances for metropolis
     int start = steps / 2;
     int NN = steps - start; // Size of the data
-    for(int B = 1; B < NN / 2; B++) {  // Loop over the number of points per block
+    for(int B = 1; B < (40000 < NN/2 ? 40000 : NN/2); B++) {  // Loop over the number of points per block
         int NB = NN / B; // The number of blocks
         Measure* avgB = malloc(sizeof(Measure) * NB); // Averages in the blocks 
         for(int b = 0; b < NB; b++){
             avgB[b] = averages(measures, start + B*b, start + B*(b + 1));
         }
         Measure varAvgB = variances(avgB, averages(avgB, 0, NB), 0, NB); // Variances in the blocks
-        if(varAvgBFile) fprintf(varAvgBFile, "%d %f %f\n", B, sqrt(varAvgB.ener / NB), sqrt(varAvgB.comp / NB));
+        if(varAvgBFile) fprintf(varAvgBFile, "%d %10.10e %10.10e %10.10e\n", B, sqrt(varAvgB.ener / NB), sqrt(varAvgB.comp / NB), sqrt(varAvgB.vol / NB));
         free(avgB);
     }
 
     fclose(varAvgBFile);
+
 }
 
 
@@ -280,8 +318,6 @@ void initialize_constants(double simulation[4]) {
     delta_s = simulation[3]; // Random Jump Size (particle move)
     delta_V = simulation[4]; // Random Jump Size (volume move)
     delta_l = simulation[5]; // Random Jump Size (volume move)
-
-    // TODO: initialize pressure P!?
 
     L = CROW * pow(M / rho0, 1.0/3.0); // rho = N/L3 = P3*M/L3
     
@@ -351,31 +387,80 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
     vec3* F = malloc(N * sizeof(vec3));
 
     // Calcolo le forze (serve per la compressibilità)
-    double W_forces = get_forces_lennard_jones(S0, F);
+    double W_forces = 0.0; // get_forces_lennard_jones(S0, F);
 
     // Calcolo l'energia potenziale
     LennardJonesPotential V0 = get_potential_energy_lennard_jones(S0);
 
     // Inizializzo le misure e misuro
     Measure* measures = calloc(steps + 1, sizeof(Measure));
-    measures[0] = measure_metropolis(S0, F, 0.0, V0.V6 + V0.V12, W_forces);
+    measures[0] = measure_metropolis(S0, 0.0, V0.V6 + V0.V12, W_forces);
 
     int position_jumps = 0;
     int volume_jumps = 0;
+    int position_steps = 0;
+    int volume_steps = 0;
     printf("Step: 0/%d", steps);
+    double last_position_acceptance = 0.5;
+    double last_volume_acceptance = 0.5;
     for(int i = 1; i <= steps; i++) {
-        if(i % 100 == 0) { 
-            printf("\rStep: %d/%d, Acceptance: %.2f", i, steps, (position_jumps + volume_jumps) / (double)i); fflush(stdout); 
+        if(i % 5000 == 0) { 
+            double acceptance = (volume_jumps + position_jumps) / ((double) i);
+            double position_acceptance = position_jumps /  (double) position_steps;
+            double volume_acceptance = volume_jumps / (double) volume_steps;
+            printf("\rStep: %d/%d, Acceptance: %f, Position Acceptance: %f (%3.1e), Volume Acceptance: %f (%3.1e)\t\t\t\t", 
+                i, steps,
+                acceptance,
+                position_acceptance, delta_s, 
+                volume_acceptance, LOGARITHMIC_VOLUME_MOVES ? delta_l : delta_V
+            ); 
+            fflush(stdout); 
+            if(i < steps/2) {
+                delta_s *= 1.0 + fmax(-0.5, (position_acceptance - 0.5)) // forza di richiamo
+                               + fmax(-0.5, fmin(0.2, (position_acceptance - last_position_acceptance) * 2)); // attrito
+                delta_V *= 1.0 + fmax(-0.5, (volume_acceptance - 0.5)) // forza di richiamo
+                               + fmax(-0.5, fmin(0.2, (volume_acceptance - last_volume_acceptance) * 2)); // attrito
+                delta_l *= 1.0 + fmax(-0.5, (volume_acceptance - 0.5)) // forza di richiamo
+                               + fmax(-0.5, fmin(0.2, (volume_acceptance - last_volume_acceptance) * 2)); // attrito
+                delta_s = fmin(1.0, delta_s);
+            }
+            last_position_acceptance = position_acceptance;
+            last_volume_acceptance = volume_acceptance;
         }
 
-        int k = floor(sample_uniform(0.0, N+1));
+        int k = floor(sample_uniform(0.0, N + 1));
         if(k == N || k == N + 1) {
+            volume_steps += 1;
             if(LOGARITHMIC_VOLUME_MOVES) {
-                // MOSSA NEL LOGARITMO DEL VOLUME (TODO)
+                // MOSSA NEL LOGARITMO DEL VOLUME
+                double epsilon_l = sample_uniform(-0.5, 0.5);
+                double lx = log(V);
+                double ly = lx + epsilon_l * delta_l;
+                double nuovo_volume = exp(ly);
+                double differenza_volumi = nuovo_volume - V;
+                double rapporto_volumi = nuovo_volume / V;
+                double differenza_potenziali = 
+                    V0.V6 *(powl(rapporto_volumi,  -6.0  / 3.0) - 1) + 
+                    V0.V12*(powl(rapporto_volumi,  -12.0 / 3.0) - 1); 
+                double jump_probability = fmin(1, 
+                    powl(rapporto_volumi, N + 1) * exp(-(differenza_potenziali + P*differenza_volumi)/Kb/T)
+                );
+                if(sample_uniform(0, 1) < jump_probability) {
+                    // Accetto il salto
+                    L = powl(nuovo_volume, 1.0/3.0);
+                    V0 = (LennardJonesPotential) {
+                        V0.V6  * powl(rapporto_volumi,  -6.0 / 3.0),
+                        V0.V12 * powl(rapporto_volumi, -12.0 / 3.0),
+                    };
+                    // W_forces = get_forces_lennard_jones(S0, F);
+                    volume_jumps += 1;
+                } else {
+                    // Rifiuto il salto
+                }
             } else {
                 // MOSSA DI VOLUME
                 double epsilon_volume = sample_uniform(-0.5, 0.5);
-                double nuovo_volume = fmax(0.0, V + epsilon_volume * delta_V);
+                double nuovo_volume = fmax(1e-8, V + epsilon_volume * delta_V);
                 double differenza_volumi = nuovo_volume - V;
                 double rapporto_volumi = nuovo_volume / V;
                 double differenza_potenziali = 
@@ -391,7 +476,7 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
                         V0.V6  * powl(rapporto_volumi,  -6.0 / 3.0),
                         V0.V12 * powl(rapporto_volumi, -12.0 / 3.0),
                     };
-                    W_forces = get_forces_lennard_jones(S0, F);
+                    // W_forces = get_forces_lennard_jones(S0, F);
                     volume_jumps += 1;
                 } else {
                     // Rifiuto il salto
@@ -399,6 +484,7 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
             }
         }else{
             // MOSSA DI POSIZIONE
+            position_steps += 1;
             vec3 delta = (vec3) { 
                 sample_uniform(-0.5, 0.5) * delta_s, 
                 sample_uniform(-0.5, 0.5) * delta_s, 
@@ -410,7 +496,7 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
             if(sample_uniform(0, 1) < jump_probability) {
                 // Accetto il salto
                 V0 = add_potentials(V0, change_in_potential_energy);
-                W_forces = get_forces_lennard_jones(S0, F);
+                // W_forces = get_forces_lennard_jones(S0, F);
                 position_jumps += 1;
             } else {
                 // Rifiuto il salto
@@ -421,10 +507,15 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
         }
 
         // Misura delle osservabili
-        measures[i] = measure_metropolis(S0, F, i, V0.V6 + V0.V12, W_forces);
-        if(histogram && i >= steps/2) add_to_distribution_histogram(S0);
+        measures[i] = measure_metropolis(S0, i, V0.V6 + V0.V12, W_forces);
+        // if(histogram && i >= steps/2) add_to_distribution_histogram(S0);
+        if(density_histogram && i >= steps/2) add_to_density_histogram(m*N/V);
     }
-    printf("\rAcceptance: %f, position_jumps/volume_jumps: %f\t\t\t\t\n", (volume_jumps + position_jumps) / ((double) steps), position_jumps /  (double)volume_jumps); 
+    printf("\rAcceptance: %f, Position Acceptance: %f, Volume Acceptance: %f\t\t\t\t\t\t\t\t \n", 
+        (volume_jumps + position_jumps) / ((double) steps), 
+        position_jumps /  (double) position_steps, 
+        volume_jumps / (double) volume_steps
+    ); 
 
     free(F);
 
@@ -432,30 +523,199 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
 }
 
 int main() {
-    const int SIM = 1;
+    const int SIM = 6;
     double simulations[SIM][6] = {
-    //   P       T       rho0      delta_s  delta_V  delta_l
-    //  {1.0,    1.1,    0.001,    0.20,      10,    1.00},
-    //  {1.0,    1.1,    0.010,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.100,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.200,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.250,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.300,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.400,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.500,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.600,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.700,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.750,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    0.800,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    1.000,    0.01,    0.01,    0.01},
-    //  {1.0,    1.1,    1.200,    0.02,      10,    1.00}, 
-        {4.0,    1.1,    1.200,    0.02,      10,    1.00}, 
+
+    //   P            T       rho0      delta_s  delta_V  delta_l
+        {  0.001,     1.0,    0.001,    0.700,     10,    0.35},
+        {  0.050,     1.0,    0.300,    0.065,     10,    0.08},
+        {  0.500,     1.0,    0.700,    0.040,     10,    0.05},
+        {  5.000,     1.0,    1.000,    0.02,      10,    0.03},
+        {  50,        1.0,    1.300,    0.02,      10,    0.02},
+        {  80,        1.0,    1.400,    0.02,      10,    0.02},
+
+    //   P             T       rho0      delta_s  delta_V  delta_l
+    //  {  0.001,      1.0,    0.001,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    0.010,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    0.100,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    0.300,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    0.600,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    0.900,    0.700,     10,    0.35},
+    //  {  0.001,      1.0,    1.200,    0.700,     10,    0.35},
+
+    //     P           T       rho0      delta_s  delta_V  delta_l
+      //  {  0.001,      2.0,    0.049,    0.700,     10,    0.35},
+    //  {  0.002,      2.0,    0.099,    0.700,     10,    0.35},
+    //  {  0.005,      2.0,    0.025,    0.500,     10,    0.30},
+    //  {  0.010,      2.0,    0.050,    0.450,     10,    0.29},
+    //  {  0.020,      2.0,    0.010,    0.450,     10,    0.28},
+    //  {  0.040,      2.0,    0.020,    0.350,     10,    0.27},
+    //  {  0.080,      2.0,    0.042,    0.350,     10,    0.26},
+    //  {  0.090,      2.0,    0.047,    0.300,     10,    0.25},
+    //  {  0.100,      2.0,    0.053,    0.300,     10,    0.24},
+    //  {  0.110,      2.0,    0.060,    0.250,     10,    0.23},
+    //  {  0.150,      2.0,    0.082,    0.250,     10,    0.22},
+      //  {  0.200,      2.0,    0.113,    0.200,     10,    0.21},
+    //  {  0.250,      2.0,    0.144,    0.200,     10,    0.20},
+    //  {  0.300,      2.0,    0.175,    0.150,     10,    0.19},
+      //  {  0.350,      2.0,    0.203,    0.150,     10,    0.18},
+      //  {  0.400,      2.0,    0.232,    0.100,     10,    0.17},
+    //  {  0.450,      2.0,    0.261,    0.100,     10,    0.16},
+      //  {  0.500,      2.0,    0.290,    0.050,     10,    0.15},
+    //  {  0.550,      2.0,    0.325,    0.050,     10,    0.14},
+      //  {  0.600,      2.0,    0.330,    0.050,     10,    0.13},
+    //  {  0.650,      2.0,    0.374,    0.050,     10,    0.12},
+    //  {  0.700,      2.0,    0.375,    0.050,     10,    0.11},
+      //  {  0.750,      2.0,    0.406,    0.050,     10,    0.08},
+    //  {  0.800,      2.0,    0.396,    0.045,     10,    0.08},
+    //  {  0.850,      2.0,    0.428,    0.045,     10,    0.08},
+    //  {  0.900,      2.0,    0.429,    0.040,     10,    0.08},
+    //  {  0.950,      2.0,    0.445,    0.040,     10,    0.08},
+    //  {  1.000,      2.0,    0.453,    0.035,     10,    0.07},
+    //  {  1.050,      2.0,    0.468,    0.035,     10,    0.07},
+    //  {  1.100,      2.0,    0.485,    0.030,     10,    0.07},
+    //  {  1.150,      2.0,    0.482,    0.045,     10,    0.07},
+      //  {  1.200,      2.0,    0.512,    0.045,     10,    0.06},
+    //  {  1.250,      2.0,    0.524,    0.050,     10,    0.06},
+    //  {  1.300,      2.0,    0.513,    0.055,     10,    0.06},
+    //  {  1.400,      2.0,    0.526,    0.060,     10,    0.06},
+    //  {  1.500,      2.0,    0.548,    0.065,     10,    0.05},
+    //  {  1.600,      2.0,    0.555,    0.065,     10,    0.05},
+    //  {  1.750,      2.0,    0.578,    0.065,     10,    0.05},
+    //  {  2.000,      2.0,    0.586,    0.065,     10,    0.05},
+      //  {  2.250,      2.0,    0.631,    0.088,     10,    0.05},
+    //  {  2.500,      2.0,    0.643,    0.020,     10,    0.05},
+    //  {  2.750,      2.0,    0.679,    0.065,     10,    0.05},
+    //  {  3.000,      2.0,    0.670,    0.100,     10,    0.05},
+      //  {  3.500,      2.0,    0.713,    0.100,     10,    0.05},
+    //  {  4.000,      2.0,    0.736,    0.110,     10,    0.05},
+    //  {  4.500,      2.0,    0.740,    0.031,     10,    0.05},
+    //  {  5.000,      2.0,    0.752,    0.032,     10,    0.05},
+    //  {  6.000,      2.0,    0.788,    0.120,     10,    0.05},
+      //  {  7.000,      2.0,    0.805,    0.010,     10,    0.05},
+    //  {  8.000,      2.0,    0.817,    0.005,     10,    0.05},
+    //  {  8.500,      2.0,    0.817,    0.005,     10,    0.05},
+    //  {  9.000,      2.0,    0.844,    0.005,     10,    0.05},
+    //  {  9.500,      2.0,    0.844,    0.005,     10,    0.05},
+    //  { 10.000,      2.0,    0.855,    0.005,     10,    0.05},
+    //  { 10.500,      2.0,    0.855,    0.005,     10,    0.05},
+    //  { 11.000,      2.0,    0.855,    0.005,     10,    0.05},
+    //  { 11.500,      2.0,    0.855,    0.005,     10,    0.05},
+    //  { 11.750,      2.0,    0.855,    0.005,     10,    0.05},
+    //  { 12.000,      2.0,    0.882,    0.005,     10,    0.05},
+    //  { 12.250,      2.0,    0.882,    0.005,     10,    0.05},
+    //  { 12.500,      2.0,    0.882,    0.005,     10,    0.10},
+    //  { 12.750,      2.0,    0.882,    0.005,     10,    0.10},
+      //  { 13.000,      2.0,    0.882,    0.005,     10,    0.10},
+      // { 13.150,      2.0,    0.925,    0.005,     10,    0.10},
+    //  { 13.500,      2.0,    1.050,    0.005,     10,    0.10},
+    //  { 13.750,      2.0,    1.050,    0.005,     10,    0.10},
+    //  { 14.000,      2.0,    1.050,    0.005,     10,    0.10},
+      //  { 14.250,      2.0,    1.050,    0.005,     10,    0.10},
+      //  { 14.500,      2.0,    1.050,    0.005,     10,    0.10},
+    //  { 14.750,      2.0,    1.100,    0.005,     10,    0.10},
+    //  { 15.000,      2.0,    0.950,    0.005,     10,    0.10},
+    //  { 15.250,      2.0,    1.100,    0.005,     10,    0.10},
+    //  { 15.500,      2.0,    1.100,    0.005,     10,    0.10},
+      //  { 15.750,      2.0,    1.100,    0.005,     10,    0.10},
+    //  { 16.000,      2.0,    1.100,    0.005,     10,    0.10},    
+    //  { 17.000,      2.0,    1.100,    0.005,     10,    0.10},    
+    //  { 18.000,      2.0,    1.150,    0.005,     10,    0.10},
+    //  { 19.000,      2.0,    1.150,    0.005,     10,    0.10},
+      //  { 20.000,      2.0,    1.150,    0.005,     10,    0.10},
+    //  { 21.000,      2.0,    1.150,    0.005,     10,    0.10},
+    //  { 22.000,      2.0,    1.150,    0.005,     10,    0.10},
+    //  { 23.000,      2.0,    1.150,    0.005,     10,    0.10},
+    //  { 24.000,      2.0,    1.200,    0.005,     10,    0.10},
+    //  { 25.000,      2.0,    1.200,    0.005,     10,    0.10},
+      //  { 26.000,      2.0,    1.200,    0.005,     10,    0.10},
+    //  { 27.000,      2.0,    1.200,    0.005,     10,    0.10},
+    //  { 28.000,      2.0,    1.200,    0.005,     10,    0.10},
+      //  { 32.000,      2.0,    1.200,    0.005,     10,    0.10},
+      //  { 40.000,      2.0,    1.200,    0.005,     10,    0.10},
+    //  { 50.000,      2.0,    1.200,    0.005,     10,    0.10},
+    //  { 60.000,      2.0,    1.300,    0.005,     10,    0.10},
+      //  { 70.000,      2.0,    1.300,    0.005,     10,    0.10},
+    //  { 80.000,      2.0,    1.300,    0.005,     10,    0.10},
+      //  { 120.000,     2.0,    1.500,    0.005,     10,    0.10},
+    //
+
+    //  { 12.750,      2.0,    0.882,    0.020,     10,    0.04},
+
+    //  { 10.000,      2.0,    0.9,    0.005,     10,    0.10},
+
+
+    //  {  2.00/1.1,       1.0,    0.900,    0.02,      10,    0.03},
+
+    //  {  0.0011*2.0/1.1,     2,  0.001,    0.800,     10,    2*0.30},
+    //  {  0.0105059*2.0/1.1,  2,  0.010,    0.600,     10,    2*0.25},
+    //  {  0.0650441*2.0/1.1,  2,  0.100,    0.300,     10,    2*0.12},
+    //  {  0.0619119*2.0/1.1,  2,  0.200,    0.070,     10,    2*0.09},
+    //  {  0.0353067*2.0/1.1,  2,  0.300,    0.065,     10,    2*0.08},
+    //  {  0.0069784*2.0/1.1,  2,  0.400,    0.060,     10,    2*0.07},
+    //  {  0.0001*2.0/1.1,     2,  0.500,    0.055,     10,    2*0.06},
+    //  {  0.0618*2.0/1.1,     2,  0.600,    0.050,     10,    2*0.05},
+    //  {  0.528*2.0/1.1,      2,  0.700,    0.040,     10,    2*0.05},
+    //  {  1.76*2.0/1.1,       2,  0.800,    0.025,     10,    2*0.05},
+    //  {  4.84*2.0/1.1,       2,  1.000,    0.02,      10,    2*0.03},
+    //  { 21.6*2.0/1.1,        2,  1.200,    0.02,      10,    2*0.02},
+
+    //  {  2.00*2.0/1.1,       2,  0.900,    0.02,      10,    2*0.03},
+
+    //  {0.000994868,	1.0, 1.00e-03, 0.1, 10, 0.1 }, 
+    //  {0.00946293,	1.0, 1.00e-02, 0.1, 10, 0.1 }, 
+    //  {0.03705045,	1.0, 5.00e-02, 0.1, 10, 0.1 }, 
+    //  {0.0440148,	    1.0, 1.00e-01, 0.1, 10, 0.1 }, 
+    //  {0.03948945,	1.0, 1.50e-01, 0.1, 10, 0.1 }, 
+    //  {0.0278508,	    1.0, 2.00e-01, 0.1, 10, 0.1 }, 
+    //  {0.017992975,	1.0, 2.50e-01, 0.1, 10, 0.1 }, 
+    //  {-0.01238076,	1.0, 3.00e-01, 0.1, 10, 0.1 }, 
+    //  {-0.04029655,	1.0, 3.50e-01, 0.1, 10, 0.1 }, 
+    //  {-0.0758,	    1.0, 4.00e-01, 0.1, 10, 0.1 }, 
+    //  {-0.12302775,	1.0, 4.50e-01, 0.1, 10, 0.1 }, 
+    //  {-0.1726835,	1.0, 5.00e-01, 0.1, 10, 0.1 }, 
+    //  {-0.18889915,	1.0, 5.50e-01, 0.1, 10, 0.1 }, 
+
+      //  { 1.60, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.80, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.90, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.92, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.93, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.94, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 1.95, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 2.00, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 2.05, 1.0, 0.9, 0.005, 10, 0.10},
+      //  { 2.10, 1.0, 0.9, 0.005, 10, 0.10},
+
+
+      //  { 13.5, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.7, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.9, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.2, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.5, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.8, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 13.9, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 14.0, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 14.1, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 14.2, 2.0, 0.97, 0.005, 10, 0.10},
+      //  { 14.3, 2.0, 0.97, 0.005, 10, 0.10},
+
+
+      // { 0.001, 1.0, 0.001, 0.005, 10, 0.10},
+      // { 0.001, 1.0, 1.000, 0.005, 10, 0.10},
+
     };
 
+    FILE* file_averages = fopen("data/averages.dat", "w+");
+ 
     Particle* S0 = malloc(N * sizeof(Particle));
-    histogram = malloc(BINS * sizeof(double));
-    unsigned int steps = 1e5;
+    
+    // if(SIM == 1) histogram = malloc(BINS * sizeof(double));
+    if(SIM == 1) density_histogram = malloc(DENSITY_BINS * sizeof(int));
+
+    unsigned int steps = 1e7;
     for(int k = 0; k < SIM; k++){
+        if(simulations[k][1] == 0.0) break;
 
         // Set file to which measurements are written (measure_metropolis)
         char file_measures_name[40]; 
@@ -463,7 +723,8 @@ int main() {
         file_measures = fopen(file_measures_name, "w+");
 
         // Reset histogram
-        memset(histogram, 0, BINS * sizeof(double)); 
+        if(histogram) memset(histogram, 0, BINS * sizeof(double)); 
+        if(density_histogram) memset(density_histogram, 0, DENSITY_BINS * sizeof(int)); 
 
         // Initialize T, delta_s, delta_V, delta_l, L
         initialize_constants(simulations[k]); 
@@ -473,21 +734,48 @@ int main() {
         Measure* measures = metropolis(S0, steps);
 
         // Calculate averages and produce plateau graph for error
-        averages_and_plateau(measures, steps, k);
+        Measure avg; Measure var; double cp;
+        averages_and_plateau(measures, steps, k, &avg, &var, &cp);
+        fprintf(file_averages, "%d %10.10e %10.10e %10.10e %10.10e %10.10e %10.10e %10.10e\n", 
+            k, avg.temp, avg.comp, avg.ener, avg.vol, avg.rho, P, cp
+        );
 
         free(measures);
         fclose(file_measures);
 
     }
 
+    fclose(file_averages);
 
-    // Finalize and export histogram
-    FILE* histogram_file = fopen("data/histogram.dat", "w+");
-    save_distribution_histogram(histogram_file, steps);
-    fclose(histogram_file);
+    // Finalize and export distribution histogram
+    if(histogram) {
+        FILE* histogram_file = fopen("data/histogram.dat", "w+");
+        save_distribution_histogram(histogram_file, steps);
+        fclose(histogram_file);
+    }
+
+    // Export density histogram
+    if(density_histogram) {
+        FILE* density_histogram_file = fopen("data/density_histogram.dat", "w+");
+        save_density_histogram(density_histogram_file);
+        fclose(density_histogram_file);
+    }
 
     // Scatter plot of particles' positions
-    save_scatter_plot(S0);
+    if(SIM == 1) save_scatter_plot(S0);
 
     return 0;
 }
+
+/*
+
+CROW = 5, N = 500, L0 = 10.000000, T = 1.000000, rho0 = 0.500000, P = -0.172683
+Acceptance: 0.792785, Position Acceptance: 0.793356, Volume Acceptance: 0.5071180e+00), Volume Acceptance: 0.507118 (4.1e+03)             
+Temperatura = 1.000000 ± 0.000000
+Compressibilità = -1002.415468 ± 502.789197
+Energia = -0.002483 ± 2.75835e-03
+Volume = 2902464.533130 ± 1.45581e+06
+Densità = 0.000263 ± 2.31146e-04
+Calore specifico (cP/kB) = 5/2 + 126397636.113555 = 126397638.613555
+
+*/

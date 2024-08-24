@@ -8,3 +8,4 @@ data
 plots
 data/*.dat
 plots/*.png
+backup
