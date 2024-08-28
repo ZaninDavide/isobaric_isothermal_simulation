@@ -1,5 +1,5 @@
 main.x: main.c
-	gcc -o main.x main.c -lm
+	gcc -o main.x main.c -lm -O2
 
 build: main.x
 

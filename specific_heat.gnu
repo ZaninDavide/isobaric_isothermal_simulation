@@ -8,7 +8,7 @@ set grid xtics ytics
 set xtics 0.1
 set ytics 2
 set yrange [0:32]
-set pointsize 3
+set pointsize 1
 
 set xlabel "Densità"
 set ylabel "Calore specifico isobaro (c_P/k_B)"

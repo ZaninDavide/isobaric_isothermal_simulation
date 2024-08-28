@@ -12,8 +12,10 @@ set xlabel "Densità ρ"
 set ylabel "Frequenza"
 
 # Histogram
+MAX_DENSITY_BIN = 1.0
 DENSITY_BINS = 300.0
-width = 1.5 / DENSITY_BINS
+width = MAX_DENSITY_BIN / DENSITY_BINS
+set xrange [0:MAX_DENSITY_BIN]
 set boxwidth width # 1 / BINS
 set style fill solid 0.20 #fillstyle
 set tics out nomirror

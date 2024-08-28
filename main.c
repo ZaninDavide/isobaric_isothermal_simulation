@@ -11,7 +11,9 @@
 #define Kb 1.0
 #define epsilon 1.0
 #define PI 3.1415926535897932384626433
+#define HISTOGRAM_SAMPLE_RATE 500
 #define BINS 150 // number of bins for the histogram of g(r)
+#define MAX_DENSITY_BIN 1.0
 #define DENSITY_BINS 300 // number of bins for the histogram of rho during the simulation
 #define LOGARITHMIC_VOLUME_MOVES 1
 
@@ -85,11 +87,12 @@ void add_to_distribution_histogram(Particle S[]) {
 
 void save_distribution_histogram(FILE* file, unsigned int steps) {
     double bin_width = 1.0 / BINS;
+    int samples = steps / HISTOGRAM_SAMPLE_RATE;
     // Normalize and print to file
     for (int j = 1; j < BINS; j++) {
         double dV = 4*PI/3.0*((j+1)*(j+1)*(j+1) - j*j*j)*bin_width*bin_width*bin_width;
-        histogram[j] /= dV * (m*N/V) * N * (steps/2);
-        fprintf(file, "%10.5e %10.5e\n", (j + 0.0) / BINS, histogram[j]);
+        histogram[j] /= dV * (m*N/V) * N * (samples/2);
+        fprintf(file, "%10.5e %10.5e\n", j / (double)BINS, histogram[j]);
     }
 }
 
@@ -101,17 +104,17 @@ void save_distribution_histogram(FILE* file, unsigned int steps) {
 int* density_histogram = NULL;
 
 void add_to_density_histogram(double density) {
-    double bin_width = 1.5 / DENSITY_BINS;
-    if(density < 1.5 & density > 0) {
+    double bin_width = MAX_DENSITY_BIN / DENSITY_BINS;
+    if(density < MAX_DENSITY_BIN & density > 0) {
         density_histogram[(int) floor(density / bin_width)] += 1;
     }else{
-        printf("Density expected to be between 0.0 and 1.5");
+        printf("Density expected to be between 0.0 and %f", MAX_DENSITY_BIN);
         exit(1);
     }
 }
 
 void save_density_histogram(FILE* file) {
-    double bin_width = 1.5 / DENSITY_BINS;
+    double bin_width = MAX_DENSITY_BIN / DENSITY_BINS;
     for (int j = 0; j < DENSITY_BINS; j++) {
         fprintf(file, "%10.5e %d\n", j * bin_width, density_histogram[j]);
     }
@@ -282,7 +285,6 @@ void averages_and_plateau(Measure *measures, int steps, int k, Measure* avg, Mea
     printf("Densità = %f ± %2.5e\n", avg->rho, sqrt(var->rho));
     printf("Calore specifico (cP/kB) = 5/2 + %f = %f\n", *cp - 2.5, *cp);
 
-
     // Plateau file
     char varAvgBFile_name[20]; 
     sprintf(varAvgBFile_name, "data/plateau_%02d.dat", k);
@@ -291,7 +293,7 @@ void averages_and_plateau(Measure *measures, int steps, int k, Measure* avg, Mea
     // Variances for metropolis
     int start = steps / 2;
     int NN = steps - start; // Size of the data
-    for(int B = 1; B < (40000 < NN/2 ? 40000 : NN/2); B++) {  // Loop over the number of points per block
+    for(int B = 1; B < (80000 < NN/2 ? 80000 : NN/2); B++) {  // Loop over the number of points per block
         int NB = NN / B; // The number of blocks
         Measure* avgB = malloc(sizeof(Measure) * NB); // Averages in the blocks 
         for(int b = 0; b < NB; b++){
@@ -303,7 +305,6 @@ void averages_and_plateau(Measure *measures, int steps, int k, Measure* avg, Mea
     }
 
     fclose(varAvgBFile);
-
 }
 
 
@@ -321,7 +322,8 @@ void initialize_constants(double simulation[4]) {
 
     L = CROW * pow(M / rho0, 1.0/3.0); // rho = N/L3 = P3*M/L3
     
-    printf("\nCROW = %d, N = %d, L0 = %f, T = %f, rho0 = %f, P = %f\n", CROW, N, L, T, rho0, P);
+    if( LOGARITHMIC_VOLUME_MOVES) printf("CROW = %d, N = %d, L0 = %f, T = %f, rho0 = %f, P = %f [LOG]\n", CROW, N, L, T, rho0, P);
+    if(!LOGARITHMIC_VOLUME_MOVES) printf("CROW = %d, N = %d, L0 = %f, T = %f, rho0 = %f, P = %f [NOLOG]\n", CROW, N, L, T, rho0, P);
 }
 
 void initialize_positions(Particle S0[]) {
@@ -508,7 +510,7 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
 
         // Misura delle osservabili
         measures[i] = measure_metropolis(S0, i, V0.V6 + V0.V12, W_forces);
-        // if(histogram && i >= steps/2) add_to_distribution_histogram(S0);
+        if(histogram && i >= steps/2 && i % HISTOGRAM_SAMPLE_RATE == 0) add_to_distribution_histogram(S0);
         if(density_histogram && i >= steps/2) add_to_density_histogram(m*N/V);
     }
     printf("\rAcceptance: %f, Position Acceptance: %f, Volume Acceptance: %f\t\t\t\t\t\t\t\t \n", 
@@ -523,16 +525,16 @@ Measure* metropolis(Particle S0[], unsigned int steps) {
 }
 
 int main() {
-    const int SIM = 6;
+    const int SIM = 53;
     double simulations[SIM][6] = {
 
     //   P            T       rho0      delta_s  delta_V  delta_l
-        {  0.001,     1.0,    0.001,    0.700,     10,    0.35},
-        {  0.050,     1.0,    0.300,    0.065,     10,    0.08},
-        {  0.500,     1.0,    0.700,    0.040,     10,    0.05},
-        {  5.000,     1.0,    1.000,    0.02,      10,    0.03},
-        {  50,        1.0,    1.300,    0.02,      10,    0.02},
-        {  80,        1.0,    1.400,    0.02,      10,    0.02},
+    //  {  0.001,     1.0,    0.001,    0.700,     10,    0.35},
+    //  {  0.050,     1.0,    0.300,    0.065,     10,    0.08},
+    //  {  0.500,     1.0,    0.700,    0.040,     10,    0.05},
+    //  {  5.000,     1.0,    1.000,    0.02,      10,    0.03},
+    //  {  50,        1.0,    1.300,    0.02,      10,    0.02},
+    //  {  80,        1.0,    1.400,    0.02,      10,    0.02},
 
     //   P             T       rho0      delta_s  delta_V  delta_l
     //  {  0.001,      1.0,    0.001,    0.700,     10,    0.35},
@@ -578,9 +580,9 @@ int main() {
       //  {  1.200,      2.0,    0.512,    0.045,     10,    0.06},
     //  {  1.250,      2.0,    0.524,    0.050,     10,    0.06},
     //  {  1.300,      2.0,    0.513,    0.055,     10,    0.06},
-    //  {  1.400,      2.0,    0.526,    0.060,     10,    0.06},
+      //  {  1.400,      2.0,    0.526,    0.060,     10,    0.06},
     //  {  1.500,      2.0,    0.548,    0.065,     10,    0.05},
-    //  {  1.600,      2.0,    0.555,    0.065,     10,    0.05},
+      //  {  1.600,      2.0,    0.555,    0.065,     10,    0.05},
     //  {  1.750,      2.0,    0.578,    0.065,     10,    0.05},
     //  {  2.000,      2.0,    0.586,    0.065,     10,    0.05},
       //  {  2.250,      2.0,    0.631,    0.088,     10,    0.05},
@@ -701,8 +703,102 @@ int main() {
       //  { 14.3, 2.0, 0.97, 0.005, 10, 0.10},
 
 
-      // { 0.001, 1.0, 0.001, 0.005, 10, 0.10},
-      // { 0.001, 1.0, 1.000, 0.005, 10, 0.10},
+     // DA QUI...
+     // { 0.001, 1.0, 0.001, 0.005, 10, 0.10},
+     // { 0.001, 1.0, 1.000, 0.005, 10, 0.10},
+     // { 0.002, 1.0, 0.001, 0.005, 10, 0.10},
+     // { 0.002, 1.0, 1.000, 0.005, 10, 0.10},
+
+     // { 0.010, 1.0,  0.001, 0.005, 10, 0.10},
+     // { 0.010, 1.0,  0.2  , 0.005, 10, 0.10},
+     // { 0.010, 1.0,  1.0  , 0.005, 10, 0.10},
+     // { 0.020, 1.0,  0.001, 0.005, 10, 0.10},
+     // { 0.020, 1.0,  0.2  , 0.005, 10, 0.10},
+     // { 0.020, 1.0,  1.0  , 0.005, 10, 0.10},
+     // { 0.040, 1.0,  0.001, 0.005, 10, 0.10},
+     // { 0.040, 1.0,  0.2  , 0.005, 10, 0.10},
+     // { 0.040, 1.0,  1.0  , 0.005, 10, 0.10},
+     // { 0.080, 1.0,  0.001, 0.005, 10, 0.10},
+     // { 0.080, 1.0,  0.2  , 0.005, 10, 0.10},
+     // { 0.080, 1.0,  1.0  , 0.005, 10, 0.10},
+     // { 0.160, 1.0,  0.001, 0.005, 10, 0.10},
+     // { 0.160, 1.0,  0.2  , 0.005, 10, 0.10},
+     // { 0.160, 1.0,  1.0  , 0.005, 10, 0.10},
+
+     // { 0.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.4, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.8, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.4, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.8, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.4, 1.0, 1.0, 0.005, 10, 0.10},
+
+     // { 0.2, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 0.4, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 0.6, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 0.8, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 1.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 1.2, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 1.4, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 1.6, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 1.8, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 2.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 2.2, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 2.4, 1.0, 0.6, 0.005, 10, 0.10},
+
+     // { 2.6, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 2.8, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 3.2, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 3.6, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 4.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 6.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 8.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 16.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 32.0, 1.0, 0.6, 0.005, 10, 0.10},
+     // { 64.0, 1.0, 0.6, 0.005, 10, 0.10},
+
+     // { 0.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.4, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 0.8, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.4, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 1.8, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.4, 1.0, 1.0, 0.005, 10, 0.10},
+
+     // { 2.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 2.8, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 3.2, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 3.6, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 4.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 6.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // { 8.0, 1.0, 1.0, 0.005, 10, 0.10},
+     // A QUI... simulare nolog
+
+
+     // { 0.0450, 2.0,  0.001, 0.005, 10, 0.10}, // un picco solo
+     // { 0.0010, 2.0,  0.001, 0.005, 10, 0.10}, // un picco solo
+     // { 0.6, 2.0,  1.0  , 0.005, 10, 0.10}, // un picco solo
+
+     // { 2.0, 1.0, 0.84, 0.005, 10, 0.10},
+     // { 2.2, 1.0, 0.84, 0.005, 10, 0.10},
+     // { 2.4, 1.0, 0.85, 0.005, 10, 0.10},
+     // { 2.6, 1.0, 0.85, 0.005, 10, 0.10},
+     // { 2.8, 1.0, 0.86, 0.005, 10, 0.10},
+     // { 3.2, 1.0, 0.87, 0.005, 10, 0.10},
+     // { 3.6, 1.0, 0.88, 0.005, 10, 0.10},
+     // { 4.0, 1.0, 0.89, 0.005, 10, 0.10},
+     
+     { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, // breaks the loop
 
     };
 
@@ -710,21 +806,23 @@ int main() {
  
     Particle* S0 = malloc(N * sizeof(Particle));
     
-    // if(SIM == 1) histogram = malloc(BINS * sizeof(double));
+    if(SIM == 1) histogram = malloc(BINS * sizeof(double));
     if(SIM == 1) density_histogram = malloc(DENSITY_BINS * sizeof(int));
 
     unsigned int steps = 1e7;
     for(int k = 0; k < SIM; k++){
         if(simulations[k][1] == 0.0) break;
+        printf("\n(%d/%d) ", k + 1, SIM);
 
         // Set file to which measurements are written (measure_metropolis)
-        char file_measures_name[40]; 
-        sprintf(file_measures_name, "data/measures_%02d.dat", k);
-        file_measures = fopen(file_measures_name, "w+");
+        // char file_measures_name[40]; 
+        // sprintf(file_measures_name, "data/measures_%02d.dat", k);
+        // file_measures = fopen(file_measures_name, "w+");
+        file_measures = NULL;
 
         // Reset histogram
         if(histogram) memset(histogram, 0, BINS * sizeof(double)); 
-        if(density_histogram) memset(density_histogram, 0, DENSITY_BINS * sizeof(int)); 
+        // if(density_histogram) memset(density_histogram, 0, DENSITY_BINS * sizeof(int)); 
 
         // Initialize T, delta_s, delta_V, delta_l, L
         initialize_constants(simulations[k]); 
@@ -766,16 +864,3 @@ int main() {
 
     return 0;
 }
-
-/*
-
-CROW = 5, N = 500, L0 = 10.000000, T = 1.000000, rho0 = 0.500000, P = -0.172683
-Acceptance: 0.792785, Position Acceptance: 0.793356, Volume Acceptance: 0.5071180e+00), Volume Acceptance: 0.507118 (4.1e+03)             
-Temperatura = 1.000000 ± 0.000000
-Compressibilità = -1002.415468 ± 502.789197
-Energia = -0.002483 ± 2.75835e-03
-Volume = 2902464.533130 ± 1.45581e+06
-Densità = 0.000263 ± 2.31146e-04
-Calore specifico (cP/kB) = 5/2 + 126397636.113555 = 126397638.613555
-
-*/

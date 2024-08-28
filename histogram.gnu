@@ -5,10 +5,10 @@ set terminal png \
 set output "plots/histogram.png"
 set grid mxtics mytics
 set grid xtics ytics
-set xrange [0:1]
+set xrange [0:0.5]
 set xtics 0.1
 
-set title "Particle distances distribution g(r)"
+set title "Particle distances distribution g(r), T = 2.0, P = 0.0010"
 set xlabel "r/L"
 set ylabel "g(r)"
 
